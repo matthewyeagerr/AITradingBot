@@ -1,13 +1,10 @@
 import tkinter as tk
 from tkinter import ttk, messagebox
-import json
 import time
 import threading
-import random
 import alpaca_trade_api as tradeapi
 import google.generativeai as genai
 
-DATA_FILE = 'equities.json'
 
 key = "PKI8CTPYSJCSYQMWQO3O"
 secret_key="abt12oNpdtGU1fs2SQ1bACReT5JH8cwMMIkpKN8g"
@@ -74,12 +71,27 @@ class TradingBotGUI:
     def __init__(self, root):
         self.root = root
         self.root.title("Trading Bot")
-        self.equities = self.load_equities()
+        self.equities = {}
         self.system_running = False
+        
+        self.account_value=tk.Label(root, text=f"Account Value: $0.00", font=("Arial", 14))
+        self.account_value.pack(pady=5)
+        
+        self.pnl_value = tk.Label(root, text="Open PnL: $0.00")
+        self.pnl_value.pack(pady=2)
+
+        
+        self.sync_with_alpaca()
+        self.update_account_value()
+    
+        
+        
         
         
         self.form_frame=tk.Frame(root)
         self.form_frame.pack(pady=10)
+        
+        
         
         
         
@@ -88,33 +100,28 @@ class TradingBotGUI:
         self.symbol_entry = tk.Entry(self.form_frame)
         self.symbol_entry.grid(row=0, column=1)
         
-        tk.Label(self.form_frame, text = "levels:").grid(row=0, column=2)
-        self.levels_entry = tk.Entry(self.form_frame)
-        self.levels_entry.grid(row=0, column=3)
+        tk.Label(self.form_frame, text="Qty").grid(row=0, column=2)
+        self.qty_entry = tk.Entry(self.form_frame)
+        self.qty_entry.grid(row=0, column=3)
         
-        tk.Label(self.form_frame, text="Drawdown%:").grid(row=0, column=4)
-        self.drawdown_entry = tk.Entry(self.form_frame)
-        self.drawdown_entry.grid(row=0, column=5)
+        
         
         self.add_button = tk.Button(self.form_frame, text="Add Equity", command=self.add_equity)
         self.add_button.grid(row=0, column=6)
         
-        # Table to track the traded equities
-        self.tree = ttk.Treeview(root, columns=("Symbol", "Position", "entry price","Levels", "Status"), show='headings')
-        for col in ["Symbol", "Position", "entry price", "Levels", "Status"]:
+        self.sell_button = tk.Button(self.form_frame, text="Sell equity", command=self.sell_equity)
+        self.sell_button.grid(row=0, column=7)
+
+        
+        self.tree = ttk.Treeview(root, columns=("Symbol", "Position", "PnL", "entry price", "total value"), show='headings')
+        for col in ["Symbol", "Position", "PnL", "entry price", "total value"]:
             self.tree.heading(col, text=col)
             self.tree.column(col, width=120)
         self.tree.pack(pady=10)
         
-        
-        #Buttons to control bot
-        self.toggle_system_button = tk.Button(root, text="Toggle selected system", command=self.toggle_selected_system)
-        self.toggle_system_button.pack(pady=5)
-        
-        self.remove_button = tk.Button(root, text="Remove selected equity", command=self.remove_selected_equity)
-        self.remove_button.pack(pady=5)
-        
-        
+        self.tree.tag_configure("pnl_positive", background="green")
+        self.tree.tag_configure("pnl_negative", background="red")
+
         #AI component
         self.chatgpt_frame = tk.Frame(root)
         self.chatgpt_frame.pack(pady=10)
@@ -125,8 +132,9 @@ class TradingBotGUI:
         self.send_button = tk.Button(self.chatgpt_frame, text="Send", command=self.send_message)
         self.send_button.grid(row=0, column=1)
         
-        self.chat_output = tk.Text(root, height=5, width=60,state=tk.DISABLED)
+        self.chat_output = tk.Text(root, height=15, width=60,state=tk.DISABLED)
         self.chat_output.pack()
+
         
         #load saved data
         self.refresh_table()
@@ -136,61 +144,116 @@ class TradingBotGUI:
         self.auto_update_threat = threading.Thread(target=self.auto_update, daemon=True)
         self.auto_update_threat.start()
         
+    def update_account_value(self):
+        try:
+            account = api.get_account()
+            value = float(account.equity)
+            pnl = self.get_open_pnl()
+            self.account_value.config(text=f"Account Value: ${value:,.2f}")
+            self.pnl_value.config(text=f"Open PnL: ${pnl:,.2f}")
+            
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to fetch account value: {e}")
+            self.pnl_value.config(text="Open PnL: $0.00")
+            
+    def get_open_pnl(self):
+        try:
+            positions=api.list_positions()
+            total_pnl = 0.0
+            for position in positions:
+                total_pnl += float(position.unrealized_pl)
+            return total_pnl
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to fetch open PnL: {e}")
+            return 0.0
+        
     def add_equity(self):
         symbol = self.symbol_entry.get().upper()
-        levels = self.levels_entry.get()
-        drawdown = self.drawdown_entry.get()
         
-        if not symbol or not levels.isdigit() or not drawdown.replace('.', '', 1).isdigit():
+        if not symbol:
             messagebox.showerror("Error", "invalid input")
             return
         
-        levels = int(levels)
-        drawdown = float(drawdown) / 100
         entry_price = self.fetch_alpaca_data(symbol)["price"]
         
-        level_prices = {i+1: round(entry_price * (1-drawdown*(i+1)),2) for i in range(levels)}
+        qty = self.qty_entry.get()
+        if not qty.isdigit() or int(qty) <= 0:
+            messagebox.showerror("Error", "Invalid quantity")
+            return
+        qty = int(qty)
+        
+        if symbol in self.equities:
+            currentQTY = self.equities[symbol]["position"]
+            newQTY = currentQTY + qty
+        else:
+            newQTY = qty
 
         
         self.equities[symbol] = {
-            "position":0,
+            "position": newQTY,
             "entry_price": entry_price,
-            "levels": level_prices,
-            "drawdown": drawdown,
-            "status": "Off"
         }
         
-        
-        self.save_equities()
-        self.refresh_table()
-        
-    def toggle_selected_system(self):
-        selected_item = self.tree.selection()
-        if not selected_item:
-            messagebox.showwarning("Warning", "No equity selected")
+        try:
+            api.submit_order(
+                symbol=symbol,
+                qty=qty,
+                side="buy",
+                type="market",
+                time_in_force="gtc"
+            
+            )
+            messagebox.showinfo("Order Placed", f"Initial Order Placed for {symbol}")   
+        except Exception as e:
+            messagebox.showerror("Order Error", f"Error placing order: {e}")
             return
         
-        for item in selected_item:
-            symbol = self.tree.item(item)["values"][0]
-            self.equities[symbol]['status'] = "On" if self.equities[symbol]['status'] == "Off" else "Off"
-            
-        self.save_equities()
+
         self.refresh_table()
     
-    def remove_selected_equity(self):
-        selected_item = self.tree.selection()
-        if not selected_item:
-            messagebox.showwarning("Warning", "No equity selected")
+    
+    def sell_equity(self):
+        symbol = self.symbol_entry.get().upper()
+        if not symbol or symbol not in self.equities:
+            messagebox.showerror("Error", "Invalid symbol")
             return
+        qtystr = self.qty_entry.get()
+        if not qtystr.isdigit() or int(qtystr) <= 0:
+            messagebox.showerror("Error", "Invalid quantity")
+            return
+        qty = int(qtystr)
         
-        for item in selected_item:
-            symbol = self.tree.item(item)["values"][0]
-            if symbol in self.equities:
+        current_position = self.equities[symbol]["position"]
+        if qty > current_position:
+            messagebox.showerror("Error", "Quantity exceeds current position")
+            return
+        try:
+            api.submit_order(
+                symbol=symbol,
+                qty=qty,
+                side="sell",
+                type="market",
+                time_in_force="gtc"
+            )
+            messagebox.showinfo("Order Placed", f"Sell Order Placed for {symbol}")
+            
+            time.sleep(2)
+            
+            try:
+                pos = api.get_position(symbol)
+                position = int(float(pos.qty))
+            except Exception as e:
+                position = 0
+            if position > 0:
+                self.equities[symbol]["position"] = position
+            else:
                 del self.equities[symbol]
-        
-        self.save_equities()
-        self.refresh_table()
-        
+                
+            self.refresh_table()
+        except Exception as e:
+            messagebox.showerror("Order Error", f"Error placing order: {e}")
+            return        
+    
     def send_message(self):
         message = self.chat_input.get()
         if not message:
@@ -214,155 +277,64 @@ class TradingBotGUI:
             return {"price":-1}
         
     
-    def check_existing_orders(self,symbol,price):
+    def sync_with_alpaca(self):
         try:
-            orders = api.list_orders(status='open', symbols = symbol)
-            for order in orders:
-                if float(order.limit_price) == price:
-                    return True
-        except Exception as e:
-            print(f"Error checking existing orders for {symbol}: {e}")
-        return False
-    
+            positions = api.list_positions()
+            self.equities = {}  # clear and refresh with live data
 
-    def get_max_entry_price(self, symbol):
-        try:
-            orders=api.list_orders(status='filled', limit =50)
-            prices = [float(order.filled_avg_price) for order in orders if order.filled_avg_price and order.symbol == symbol]
-            if prices:
-                return max(prices)
-            else:
-                latest_trade = api.get_latest_trade(symbol)
-                return latest_trade.price
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to get max entry price for {symbol}: {e}")
-            return 0
-        
-    def has_any_open_orders(self, symbol):
-        try:
-            orders = api.list_orders(status='open', symbols=[symbol])
-            return len(orders) > 0
-        except Exception as e:
-            print(f"Error checking open orders for {symbol}: {e}")
-            return False
+            for pos in positions:
+                symbol = pos.symbol
+                qty = int(float(pos.qty))
+                entry_price = float(pos.avg_entry_price)
 
-    def trade_systems(self):
-        for symbol, data in self.equities.items():
-            if data['status'] == "On":
-                position_exists = False
+                self.equities[symbol] = {
+                    "position": qty,
+                    "entry_price": entry_price
+                }
 
-                
-                try:
-                    position = api.get_position(symbol)
-                    entry_price = self.get_max_entry_price(symbol)
-                    position_exists = True
-                except Exception as e:
-                    if self.has_any_open_orders(symbol):
-                        print(f"Open order exist for {symbol}, skipping new market order.")
-                        entry_price = self.get_max_entry_price(symbol)
-                        
-                    else:
-                        api.submit_order(
-                            symbol=symbol,
-                            qty=1,
-                            side="buy",
-                            type="market",
-                            time_in_force="gtc"
-                        )
-                        messagebox.showinfo("Order Placed", f"Iniital Order Placed for {symbol}")
-                        time.sleep(2)
-                        entry_price = self.get_max_entry_price(symbol)
-                print(entry_price)
-                
-                if entry_price <= 0:
-                    messagebox.showerror("Error", f"Failed to fetch entry price for {symbol}. Skipping.")
-                    continue
-                
-                level_prices = {}
-                for i in range(len(data['levels'])):
-                    price = round(entry_price * (1 - data['drawdown'] * (i+1)), 2)
-                    if price > 0:
-                        level_prices[i+1] = price
-                    else:
-                        print(f"Skipping invalid price {price} at level {i+1} for {symbol}")
 
-                
-                existing_levels = self.equities.get(symbol, {}).get('levels', {})
-                for level, price in level_prices.items():
-                    if level not in existing_levels and -level not in existing_levels:
-                        existing_levels[level] = price
-                        
-                self.equities[symbol]['entry_price'] = entry_price
-                self.equities[symbol]['levels'] = existing_levels
-                self.equities[symbol]['position'] = 1
-                
-                for level,prices in level_prices.items():
-                    if level in self.equities[symbol]['levels']:
-                        if not self.check_existing_orders(symbol, prices):
-                            self.place_order(symbol, prices, level)
-                        
-                
-            self.save_equities()
-            self.refresh_table()
-            
-        else:
-            return
-        
-    def place_order(self, symbol, price, level):
-        if -level in self.equities[symbol]['levels'] or '-1' in self.equities[symbol]['levels'].keys():
-            return
-        
-        try:
-            api.submit_order(
-                symbol=symbol,
-                qty=1,
-                side='buy',
-                type='limit',
-                time_in_force='gtc',
-                limit_price=price
-            )
-            self.equities[symbol]['levels'][-level] = price
-            del self.equities[symbol]['levels'][level]
-            print(f"Placed order for {symbol}@{price}")
         except Exception as e:
-            messagebox.showerror("Order Error", f"Error placing order {e}")
-    
-            
-        
+            messagebox.showerror("Sync Error", f"Failed to sync with Alpaca: {e}")
+
+
+   
     def refresh_table(self):
         for row in self.tree.get_children():
             self.tree.delete(row)
             
         for symbol, data in self.equities.items():
+            current_price = self.fetch_alpaca_data(symbol)["price"]
+            entry_price= data["entry_price"]
+            qty = data["position"]
+            
+            pnl = round((current_price - entry_price) * qty, 2)
+            pnl_str = f"${pnl:,.2f}"
+            tag = "pnl_positive" if pnl >= 0 else "pnl_negative"
+            
+            total_value = round(data["position"] * current_price,2)
+            total_value_str = f"${total_value:,.2f}"
+            entry_price_str = f"${data['entry_price']:,.2f}"
             self.tree.insert("", "end", values=(
                 symbol,
                 data["position"],
-                data["entry_price"],
-                str(data["levels"]),
-                data["status"]
-                ))
+                pnl_str,
+                entry_price_str,
+                total_value_str
+                ), tags=(tag,))
         
         
     def auto_update(self):
         while self.running:
-            time.sleep(5)
-            self.trade_systems()
-    
-    
-    def save_equities(self):
-        with open(DATA_FILE, 'w') as f:
-            json.dump(self.equities, f)
+            time.sleep(10)
+            self.sync_with_alpaca()
+            self.refresh_table()
             
-    def load_equities(self):
-        try:
-            with open(DATA_FILE, 'r') as f:
-                return json.load(f)
-        except (FileNotFoundError, json.JSONDecodeError):
-            return {} 
+    
+    
+
         
     def on_close(self):
         self.running = False
-        self.save_equities()
         self.root.destroy()
         
 if __name__ == "__main__":
