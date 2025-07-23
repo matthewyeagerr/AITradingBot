@@ -6,8 +6,8 @@ import alpaca_trade_api as tradeapi
 import google.generativeai as genai
 from datetime import datetime
 
-key = "PKI8CTPYSJCSYQMWQO3O"
-secret_key="abt12oNpdtGU1fs2SQ1bACReT5JH8cwMMIkpKN8g"
+key = "ENTER YOUR OWN KEY"
+secret_key="ENTER YOUR OWN SECRET KEY"
 BASE_URL = "https://paper-api.alpaca.markets/"
 api = tradeapi.REST(key, secret_key, BASE_URL, api_version='v2')
 def fetch_portfolio():
@@ -41,7 +41,7 @@ def fetch_mock_API(symbol):
         "price": 100
     }
     
-genai.configure(api_key="AIzaSyAqukhpb05XCD58w4Kiv2hzJpKSIxrD_qI")
+genai.configure(api_key="ENTER YOUR OWN KEY")
 
 def analyze_message(message):
     portfolio_data = fetch_portfolio()
