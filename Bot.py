@@ -4,7 +4,7 @@ import time
 import threading
 import alpaca_trade_api as tradeapi
 import google.generativeai as genai
-
+from datetime import datetime
 
 key = "PKI8CTPYSJCSYQMWQO3O"
 secret_key="abt12oNpdtGU1fs2SQ1bACReT5JH8cwMMIkpKN8g"
@@ -79,7 +79,11 @@ class TradingBotGUI:
         
         self.pnl_value = tk.Label(root, text="Open PnL: $0.00")
         self.pnl_value.pack(pady=2)
+        
+        self.buyingpower = tk.Label(root, text="Buying Power: $0.00")
+        self.buyingpower.pack(pady=2)
 
+        
         
         self.sync_with_alpaca()
         self.update_account_value()
@@ -104,23 +108,50 @@ class TradingBotGUI:
         self.qty_entry = tk.Entry(self.form_frame)
         self.qty_entry.grid(row=0, column=3)
         
+        tk.Label(self.form_frame, text="Order Type:").grid(row=0, column=4)
+        self.order_type = ttk.Combobox(self.form_frame, values=["Market", "Limit"], state="readonly")
+        self.order_type.grid(row=0, column=5)
+        self.order_type.set("Market")  # Default to Market order
         
         
-        self.add_button = tk.Button(self.form_frame, text="Add Equity", command=self.add_equity)
-        self.add_button.grid(row=0, column=6)
+        tk.Label(self.form_frame, text="Limit Price:").grid(row=0, column=6)
+        self.limit_price_entry = tk.Entry(self.form_frame)
+        self.limit_price_entry.grid(row=0, column=7)
         
-        self.sell_button = tk.Button(self.form_frame, text="Sell equity", command=self.sell_equity)
-        self.sell_button.grid(row=0, column=7)
+        self.order_type.bind("<<ComboboxSelected>>", self.on_order_type_change)
+        if self.order_type.get() == "Market":
+            self.limit_price_entry.config(state=tk.DISABLED)
+        
+        
+        
+        self.add_button = tk.Button(self.form_frame, text="Buy", command=self.add_equity)
+        self.add_button.grid(row=0, column=8)
 
-        
-        self.tree = ttk.Treeview(root, columns=("Symbol", "Position", "PnL", "entry price", "total value"), show='headings')
-        for col in ["Symbol", "Position", "PnL", "entry price", "total value"]:
+        self.sell_button = tk.Button(self.form_frame, text="Sell", command=self.sell_equity)
+        self.sell_button.grid(row=0, column=9)
+
+
+        self.tree = ttk.Treeview(root, columns=("Symbol", "Position", "PnL", "PnL %", "entry price", "current price", "total value"), show='headings')
+        for col in ["Symbol", "Position", "PnL", "PnL %", "entry price", "current price", "total value"]:
             self.tree.heading(col, text=col)
             self.tree.column(col, width=120)
         self.tree.pack(pady=10)
         
         self.tree.tag_configure("pnl_positive", background="green")
         self.tree.tag_configure("pnl_negative", background="red")
+        
+        
+        self.orders_frame = tk.Frame(root)
+        order_label = tk.Label(self.orders_frame, text="Orders", font=("Arial", 14))
+        order_label.pack(pady=5)
+        
+        self.orders_tree = ttk.Treeview(self.orders_frame, columns=("Symbol", "Qty", "Side", "Price", "Status","Filled at"), show='headings')
+        for col in ["Symbol", "Qty", "Side", "Price", "Status", "Filled at"]:
+            self.orders_tree.heading(col, text=col)
+            self.orders_tree.column(col, width=120, anchor="center")
+        self.orders_tree.pack()
+        self.orders_frame.pack(pady=10)
+        
 
         #AI component
         self.chatgpt_frame = tk.Frame(root)
@@ -144,17 +175,70 @@ class TradingBotGUI:
         self.auto_update_threat = threading.Thread(target=self.auto_update, daemon=True)
         self.auto_update_threat.start()
         
+    def refresh_orders(self):
+        for row in self.orders_tree.get_children():
+            self.orders_tree.delete(row)
+        
+        try:
+            orders = api.list_orders(status='all')
+            for order in orders:
+                    filled_val = order.filled_at
+                    if filled_val:
+                        if isinstance(filled_val, str):
+                            dt = datetime.strptime(filled_val, "%Y-%m-%dT%H:%M:%SZ")
+                        else:
+                            dt = filled_val
+                        filled_at = dt.strftime("%Y-%m-%d %H:%M:%S")
+                    else:
+                        filled_at = "N/A"
+
+                    def safeformat(price):
+                        try:
+                            return f"${float(price):.2f}"
+                        except (ValueError, TypeError):
+                                return "N/A"
+                        
+                    if order.limit_price is not None:
+                        price_display = safeformat(order.limit_price)
+                    elif order.filled_avg_price is not None:
+                        price_display = safeformat(order.filled_avg_price)
+                    else:
+                        price_display = "Market"
+                    self.orders_tree.insert("", "end", values=(
+                        order.symbol,
+                        order.qty,
+                        order.side.capitalize(),
+                        price_display,
+                        order.status.capitalize(),
+                        filled_at
+                    ))
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to fetch orders: {e}")
+        
+        
+    def on_order_type_change(self, event=None):
+        selected = self.order_type.get().lower()
+        if selected == "limit":
+            self.limit_price_entry.config(state=tk.NORMAL)
+        else:
+            self.limit_price_entry.config(state=tk.DISABLED)
+            self.limit_price_entry.delete(0, tk.END)
+        
     def update_account_value(self):
         try:
             account = api.get_account()
             value = float(account.equity)
+            buying_power = float(account.buying_power)
             pnl = self.get_open_pnl()
             self.account_value.config(text=f"Account Value: ${value:,.2f}")
             self.pnl_value.config(text=f"Open PnL: ${pnl:,.2f}")
-            
+            self.buyingpower.config(text=f"Buying Power: ${buying_power:,.2f}")
+
         except Exception as e:
             messagebox.showerror("Error", f"Failed to fetch account value: {e}")
             self.pnl_value.config(text="Open PnL: $0.00")
+            self.account_value.config(text="Account Value: $0.00")
+            self.buyingpower.config(text="Buying Power: $0.00")
             
     def get_open_pnl(self):
         try:
@@ -182,6 +266,42 @@ class TradingBotGUI:
             return
         qty = int(qty)
         
+        order_type = self.order_type.get().lower()
+        limit_price = self.limit_price_entry.get()
+        
+        order_args = {
+            "symbol": symbol,
+            "qty": qty,
+            "side": "buy",
+            "type": order_type,
+            "time_in_force": "gtc"
+        }
+        
+        current_price = self.fetch_alpaca_data(symbol)["price"]
+        
+        if order_type.lower() == "limit":
+            try:
+                limit_price_float = float(limit_price)
+            except ValueError:
+                messagebox.showerror("Error", "Invalid limit price")
+                return
+
+            if limit_price_float > current_price:
+                messagebox.showerror("Error", "Limit price cannot be greater than current price")
+                return
+
+            order_args["limit_price"] = limit_price_float
+        
+        
+        try:
+            api.submit_order(**order_args)
+            messagebox.showinfo("Order Placed", f"Order Placed for {symbol}")
+            self.refresh_orders()
+        except Exception as e:
+            messagebox.showerror("Order Error", f"Error placing order: {e}")
+            return
+        
+        
         if symbol in self.equities:
             currentQTY = self.equities[symbol]["position"]
             newQTY = currentQTY + qty
@@ -194,22 +314,9 @@ class TradingBotGUI:
             "entry_price": entry_price,
         }
         
-        try:
-            api.submit_order(
-                symbol=symbol,
-                qty=qty,
-                side="buy",
-                type="market",
-                time_in_force="gtc"
-            
-            )
-            messagebox.showinfo("Order Placed", f"Initial Order Placed for {symbol}")   
-        except Exception as e:
-            messagebox.showerror("Order Error", f"Error placing order: {e}")
-            return
-        
 
         self.refresh_table()
+        self.refresh_orders()
     
     
     def sell_equity(self):
@@ -227,32 +334,52 @@ class TradingBotGUI:
         if qty > current_position:
             messagebox.showerror("Error", "Quantity exceeds current position")
             return
-        try:
-            api.submit_order(
-                symbol=symbol,
-                qty=qty,
-                side="sell",
-                type="market",
-                time_in_force="gtc"
-            )
-            messagebox.showinfo("Order Placed", f"Sell Order Placed for {symbol}")
+        
+        order_type = self.order_type.get().lower()
+        limit_price = self.limit_price_entry.get()
+        
+        order_args = {
+            "symbol": symbol,
+            "qty": qty,
+            "side": "sell",
+            "type": order_type,
+            "time_in_force": "gtc"
+        }
+        
+        if order_type.lower() == "limit":
+            try:
+                limit_price_float = float(limit_price)
+            except ValueError:
+                messagebox.showerror("Error", "Invalid limit price")
+                return
             
-            time.sleep(2)
+            current_price = self.fetch_alpaca_data(symbol)["price"]
+            if limit_price_float < current_price:
+                messagebox.showerror("Error", "Limit price cannot be lower than current price")
+                return
+        
+            order_args["limit_price"] = limit_price_float
+        
+        try:
+            api.submit_order(**order_args)
+            messagebox.showinfo("Order Placed", f"Sell Order Placed for {symbol}")
+            self.refresh_orders()
+            time.sleep(5)
             
             try:
                 pos = api.get_position(symbol)
                 position = int(float(pos.qty))
             except Exception as e:
                 position = 0
+                
             if position > 0:
                 self.equities[symbol]["position"] = position
             else:
                 del self.equities[symbol]
-                
             self.refresh_table()
         except Exception as e:
             messagebox.showerror("Order Error", f"Error placing order: {e}")
-            return        
+            return     
     
     def send_message(self):
         message = self.chat_input.get()
@@ -309,16 +436,25 @@ class TradingBotGUI:
             
             pnl = round((current_price - entry_price) * qty, 2)
             pnl_str = f"${pnl:,.2f}"
+            if entry_price >0:
+                pnl_percent = ((current_price - entry_price) / entry_price) * 100
+            else:
+                pnl_percent = 0.0
+            pnl_percent_str = f"{pnl_percent:.2f}%"
+            
             tag = "pnl_positive" if pnl >= 0 else "pnl_negative"
             
             total_value = round(data["position"] * current_price,2)
             total_value_str = f"${total_value:,.2f}"
             entry_price_str = f"${data['entry_price']:,.2f}"
+            current_price_str = f"${current_price:,.2f}"
             self.tree.insert("", "end", values=(
                 symbol,
                 data["position"],
                 pnl_str,
+                pnl_percent_str,
                 entry_price_str,
+                current_price_str,
                 total_value_str
                 ), tags=(tag,))
         
@@ -328,9 +464,7 @@ class TradingBotGUI:
             time.sleep(10)
             self.sync_with_alpaca()
             self.refresh_table()
-            
-    
-    
+            self.refresh_orders()
 
         
     def on_close(self):
